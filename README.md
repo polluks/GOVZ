@@ -1,4 +1,4 @@
-# MC6847 (VDG) Video Modes for C128 8563 VDC
+# MC6847 (VDG) Video Modes for C128 VDC 8563
 
 This document describes the MC6847 Video Display Generator (VDG) modes as used on
 the VZ200 series computers, and how a compatible alphanumeric mode is implemented
@@ -77,11 +77,11 @@ The VZ200 computer maps MC6847 modes via its video mode register (typically at I
 
 *Note: SG6 (64×48) requires INT/EXT=1 and is less commonly used on stock VZ200.*
 
-## 4. 8563 VDC (C128) Capabilities vs MC6847
+## 4. VDC 8563 (C128) Capabilities vs MC6847
 
-The 8563 VDC is fundamentally different from the MC6847:
+The VDC 8563 is fundamentally different from the MC6847:
 
-| Feature | MC6847 (VDG) | 8563 VDC (C128) |
+| Feature | MC6847 (VDG) | VDC 8563 (C128) |
 |---------|--------------|-----------------|
 | Type | Character+Bitmap generator with fixed modes | Programmable display controller |
 | Max Resolution | 256×192 (2-color), 128×192 (4-color) | Up to ~640×200 mono, 320×200 4-color (R0/R1/R6/R7 configurable) |
@@ -95,9 +95,9 @@ colour generation or its exact fetch timing. However, it can reproduce the
 *geometric resolutions and bit layouts* of 6847 modes through register programming
 and a matching memory organisation.
 
-## 5. Mapping the MC6847 onto the 8563 VDC
+## 5. Mapping the MC6847 onto the VDC 8563
 
-### 5.1 8563 VDC register map (confirmed)
+### 5.1 VDC 8563 register map (confirmed)
 
 | Reg | Name | Function |
 |-----|------|----------|
@@ -253,8 +253,8 @@ above was required instead.
 
 - vz200.org - VZ200/VZ300 Hardware Documentation
 - Motorola MC6847 Video Display Generator Datasheet
-- Commodore 128 Programmer's Reference Guide - 8563 VDC
-- MOS 8563/8568 VDC datasheet
+- Commodore 128 Programmer's Reference Guide - VDC 8563
+- MOS VDC 8563/8568 datasheet
 - VICE emulator sources: `src/vdc/vdc.c`, `src/vdc/vdc-mem.c`, `src/vdc/vdc-color.c`
 - C128 KERNAL ROM `kernal-318020-05` (VDC init table at `$E2F8`)
 - Wikipedia: Motorola 6847
