@@ -323,6 +323,7 @@ draw_col:
         ; ===== Character set data ==========
         ; Reserve 1280 bytes for the character set (64*16 + 16*16)
         ; This will be filled with zeros; replace with actual bitmap data as needed.
+
 CHARSET:
-        ds 1280
+        DS 1280
         end
