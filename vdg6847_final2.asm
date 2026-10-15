@@ -1,329 +1,312 @@
-; VDG 6847 video mode emulation for Commodore 128 VDC (MOS Technology 8563/8568)
-; This program configures the VDC to display a 32x16 character grid (each cell 8x8 pixels)
-; with a custom character set that includes:
-;   - 64 standard text characters (uppercase ASCII/graphics)
-;   - 16 custom 2x2 graphics shapes (scaled to 4x4 pixels per cell)
-; It then fills the screen with a test pattern showing all 16 shapes in different colors.
-; Assemble with: vasm6502_oldstyle -Fbin -o vdg6847_final2.bin vdg6847_final2.asm
-; Then convert to .prg: printf '\x00\x10' | cat - vdg6847_final2.bin > vdg6847.prg
+;=====================================================================
+; vdg6847_final2.asm -- MC6847 "VDG" video mode for the C128 VDC
+;---------------------------------------------------------------------
+; Emulates the alphanumeric display of the Motorola MC6847 Video Display
+; Generator (the chip used in the VZ200/VZ300, TRS-80 CoCo, Dragon 32/64,
+; ...) on the Commodore 128 80 column VDC (MOS 8563/8568).
+;
+;   * 32 x 16 character matrix          (exactly like the MC6847)
+;   * 8 x 8 pixel character cells       -> 256 x 128 pixel window
+;   * the real MC6847 internal character ROM (64 glyphs) is uploaded to
+;     the VDC character set memory at $2000
+;   * MC6847 text colours: green on dark green
+;
+; The screen matrix is built at VDC $0000 and the character set at VDC
+; $2000 (where the C128 KERNAL already keeps its character set).
+;
+; The VDC advances the screen pointer by R1 (horizontal displayed) plus
+; R27 (extra address increment per row) after every character row, so
+; R27 must stay 0 here; the C128 KERNAL also uses R1=80, R27=0.
+;
+; Assemble:
+;   vasm6502_oldstyle -Fbin -o vdg6847.bin vdg6847_final2.asm
+; Make a runnable program:
+;   (printf '\x00\x10'; cat vdg6847.bin) > vdg6847.prg
+; Run from the 80 column screen with:
+;   SYS 4096
+;
+; NOTE: the program takes over the 80 column display and then loops
+;       forever, so use the reset button to get back to BASIC.
+;=====================================================================
 
         org $1000
 
-        ; ===== Equates for VDC registers =====
-VDC_REG   = $d600    ; VDC register select (write only)
-VDC_DATA  = $d601    ; VDC data register (read/write)
+;--- VDC I/O ---------------------------------------------------------
+VDC_A   = $d600             ; register select  (write) / status (read)
+VDC_D   = $d601             ; register data
 
-        ; ===== VDC Register Numbers (0-36) =====
-REG_HT    = $00      ; Horizontal Total
-REG_HD    = $01      ; Horizontal Displayed
-REG_HP    = $02      ; Horizontal Sync Position
-REG_VHW   = $03      ; Vertical/Horizontal Sync Width
-REG_VT    = $04      ; Vertical Total
-REG_VA    = $05      ; Vertical Adjust
-REG_VD    = $06      ; Vertical Displayed
-REG_VP    = $07      ; Vertical Sync Position
-REG_IM    = $08      ; Interlace Mode
-REG_CT    = $09      ; Character Total Vertical
-REG_CS    = $0a      ; Cursor Mode, Start Scan
-REG_CE    = $0b      ; Cursor End Scan Line
-REG_DSH   = $0c      ; Display Start Address High Byte
-REG_DSL   = $0d      ; Display Start Address Low Byte
-REG_CPH   = $0e      ; Cursor Position High Byte
-REG_CPL   = $0f      ; Cursor Position Low Byte
-REG_LPV   = $10      ; Light Pen Vertical Position
-REG_LPH   = $11      ; Light Pen Horizontal Position
-REG_UAH   = $12      ; Update Address High Byte
-REG_UAL   = $13      ; Update Address Low Byte
-REG_AAH   = $14      ; Attribute Start Address High Byte
-REG_AAL   = $15      ; Attribute Start Address Low Byte
-REG_CTH   = $16      ; Character Total Horizontal
-REG_CDH   = $16      ; Character Display Horizontal (same address)
-REG_CDV   = $17      ; Character Display Vertical
-REG_VSS   = $18      ; Vertical Smooth Scrolling
-REG_HSS   = $19      ; Horizontal Smooth Scrolling
-REG_FGBG  = $1a      ; Foreground/Background color
-REG_AI    = $1b      ; Address Increment per Row
-REG_CBA   = $1c      ; Character Base Address
-REG_UL    = $1d      ; Underline Scan Line
-REG_WC    = $1e      ; Word Count
-REG_DR    = $1f      ; Data Register
-REG_BSH   = $20      ; Block Start Address High Byte
-REG_BSL   = $21      ; Block Start Address Low Byte
-REG_DEB   = $22      ; Display Enable Begin
-REG_DEE   = $23      ; Display Enable End
-REG_DRR   = $24      ; DRAM Refresh Rate
+;--- VDC register numbers -------------------------------------------
+R_HD    = 1                 ; horizontal displayed
+R_VD    = 6                 ; vertical displayed
+R_CM    = 10                ; cursor mode / start scan
+R_DSHI  = 12                ; display start address, high
+R_DSLO  = 13                ; display start address, low
+R_UAHI  = 18                ; update address, high
+R_UALO  = 19                ; update address, low
+R_MODE  = 25                ; text/attributes/semigraphics/double pixel
+R_COL   = 26                ; foreground/background colour (RGBI)
+R_AIR   = 27                ; additional address increment per row
+R_DATA  = 31                ; data register
 
-        ; ===== Other constants =====
-SCREEN_WIDTH_CHARS  = 32   ; Characters horizontally
-SCREEN_HEIGHT_CHARS = 16   ; Characters vertically
-CHAR_WIDTH_PIXELS   = 8    ; Pixels per character width
-CHAR_HEIGHT_PIXELS  = 8    ; Pixels per character height
-SCREEN_WIDTH_PIXELS = SCREEN_WIDTH_CHARS * CHAR_WIDTH_PIXELS
-SCREEN_HEIGHT_PIXELS= SCREEN_HEIGHT_CHARS * CHAR_HEIGHT_PIXELS
+;--- constants -------------------------------------------------------
+SCREEN  = $0000             ; screen matrix in VDC RAM
+CHARSET = $2000             ; character set in VDC RAM
+COLS    = 32                ; MC6847: 32 columns
+ROWS    = 16                ; MC6847: 16 rows
+COLOR   = $54               ; RGBI: fg = 5 light green, bg = 4 dark green
 
-        ; Character set layout in VDC RAM:
-        ;   $0000-$03FF: Standard text characters (64 * 16 bytes)
-        ;   $0400-$04FF: Graphics shapes (16 shapes * 16 bytes)
-        ; Total: 1280 bytes ($0500)
-CHARSET_BASE    = $2000    ; Base address of charset in VDC RAM
-SCREEN_BASE     = $0000    ; Base address of screen memory in VDC RAM
-ATTRIBUTE_BASE  = $0800    ; Base address of attribute memory in VDC RAM
-
-        ; ===== Begin code =====
-        sei                     ; Disable interrupts
+        sei
         ldx #$ff
-        txs                     ; Initialize stack pointer
+        txs
 
-        ; ===== Configure VDC registers for 32x16 cell display (8x8 pixels/cell) =====
-        ; Horizontal Displayed = SCREEN_WIDTH_CHARS * CHAR_WIDTH_PIXELS = 256 ($0100)
-        ldx #REG_HD
-        stx VDC_REG
-        lda #<SCREEN_WIDTH_PIXELS
-        sta VDC_DATA            ; Low byte
-        lda #>SCREEN_WIDTH_PIXELS
-        sta VDC_DATA            ; High byte
+;--- display geometry: 32 x 16 character cells ----------------------
+        lda #COLS
+        ldx #R_HD
+        jsr wreg
+        lda #ROWS
+        ldx #R_VD
+        jsr wreg
 
-        ; Vertical Displayed = SCREEN_HEIGHT_CHARS * CHAR_HEIGHT_PIXELS = 128 ($0080)
-        ldx #REG_VD
-        stx VDC_REG
-        lda #<SCREEN_HEIGHT_PIXELS
-        sta VDC_DATA            ; Low byte
-        lda #>SCREEN_HEIGHT_PIXELS
-        sta VDC_DATA            ; High byte
+;--- cursor off -----------------------------------------------------
+        lda #$20
+        ldx #R_CM
+        jsr wreg
 
-        ; Character Display Horizontal = CHAR_WIDTH_PIXELS
-        ldx #REG_CDH
-        stx VDC_REG
-        lda #CHAR_WIDTH_PIXELS
-        sta VDC_DATA
-
-        ; Character Display Vertical = CHAR_HEIGHT_PIXELS
-        ldx #REG_CDV
-        stx VDC_REG
-        lda #CHAR_HEIGHT_PIXELS
-        sta VDC_DATA
-
-        ; Character Base Address = CHARSET_BASE in VDC RAM
-        ; Register $1C: CB15-CB13 (bits7-5), RAM (bit4), bits3-0 unused.
-        ; Setting RAM=1 and CB15-CB13=%000 places charset at $2000 (power-on default).
-        ldx #REG_CBA
-        stx VDC_REG
-        lda #%00010000          ; %000 1 0000 -> CB15-CB13=000, RAM=1
-        sta VDC_DATA
-
-        ; Underline Scan Line = 0 (disable underlining)
-        ldx #REG_UL
-        stx VDC_REG
+;--- text mode, attributes off --------------------------------------
         lda #$00
-        sta VDC_DATA
+        ldx #R_MODE
+        jsr wreg
 
-        ; Address Increment per Row = SCREEN_WIDTH_CHARS bytes (32 chars per row)
-        ldx #REG_AI
-        stx VDC_REG
-        lda #SCREEN_WIDTH_CHARS
-        sta VDC_DATA
+;--- MC6847 colours: green on dark green ----------------------------
+        lda #COLOR
+        ldx #R_COL
+        jsr wreg
 
-        ; Display Start Address (screen memory) = SCREEN_BASE
-        ldx #REG_DSH
-        stx VDC_REG
-        lda #<SCREEN_BASE
-        sta VDC_DATA
-        lda #>SCREEN_BASE
-        sta VDC_DATA
-        ldx #REG_DSL
-        stx VDC_REG
-        lda #<SCREEN_BASE
-        sta VDC_DATA
-        lda #>SCREEN_BASE
-        sta VDC_DATA
+;--- row stride = R_HD (32) + R_AIR, so R_AIR must be 0 -------------
+        lda #0
+        ldx #R_AIR
+        jsr wreg
 
-        ; Attribute Start Address = ATTRIBUTE_BASE
-        ldx #REG_AAH
-        stx VDC_REG
-        lda #<ATTRIBUTE_BASE
-        sta VDC_DATA
-        lda #>ATTRIBUTE_BASE
-        sta VDC_DATA
-        ldx #REG_AAL
-        stx VDC_REG
-        lda #<ATTRIBUTE_BASE
-        sta VDC_DATA
-        lda #>ATTRIBUTE_BASE
-        sta VDC_DATA
+;--- display start address = $0000 ----------------------------------
+        lda #>SCREEN
+        ldx #R_DSHI
+        jsr wreg
+        lda #<SCREEN
+        ldx #R_DSLO
+        jsr wreg
 
-        ; Default foreground/background color (white on black)
-        ldx #REG_FGBG
-        stx VDC_REG
-        lda #$0f                ; %1111: FG=$F (white), BG=$0 (black)
-        sta VDC_DATA
-
-        ; ===== Copy custom character set to VDC RAM =====
-        ; Assume charset data is placed in C128 RAM at label CHARSET (see end of file)
-        ; We copy 1280 bytes (64 text*16 + 16 shapes*16) to VDC RAM at CHARSET_BASE.
+;--- upload the MC6847 character set (64 glyphs, 1024 bytes) --------
         lda #<CHARSET
-        sta $fb                 ; Pointer low byte
+        sta $fb
         lda #>CHARSET
-        sta $fc                 ; Pointer high byte
-        lda #<1280
-        sta $fd                 ; Counter low byte
-        lda #>1280
-        sta $fe                 ; Counter high byte
-copy_charset:
-        ldy #$00
-        lda ($fb),y             ; Load byte from C128 RAM
-        ldx #REG_DR
-        stx VDC_REG
-        sta VDC_DATA            ; Write to VDC RAM (triggers write)
-        iny
-        inc $fb
-        bne no_inc_fc
-        inc $fc
-no_inc_fc:
-        dec $fd
-        bne copy_charset
-        dec $fe
-        bne copy_charset
-
-        ; ===== Initialize screen memory (fill with spaces) =====
-        lda #<SCREEN_BASE
-        sta $fb
-        lda #>SCREEN_BASE
         sta $fc
-        lda #<(SCREEN_WIDTH_CHARS * SCREEN_HEIGHT_CHARS * 2)  ; 2 bytes per cell (screen+attr) but we only clear screen here
-        sta $fd
-        lda #>(SCREEN_WIDTH_CHARS * SCREEN_HEIGHT_CHARS * 2)
-        sta $fe
-clear_screen:
-        ldy #$00
-        lda #$20                ; Space character code
-        ldx #REG_DR
-        stx VDC_REG
-        sta VDC_DATA
+        jsr set_uaddr
+
+        ldy #0
+.cf0:   lda font+0,y
+        jsr putbyte
         iny
-        inc $fb
-        bne no_inc2_fc
-        inc $fc
-no_inc2_fc:
-        dec $fd
-        bne clear_screen
-        dec $fe
-        bne clear_screen
-
-        ; ===== Initialize attribute memory (default colors) =====
-        lda #<ATTRIBUTE_BASE
-        sta $fb
-        lda #>ATTRIBUTE_BASE
-        sta $fc
-        lda #<(SCREEN_WIDTH_CHARS * SCREEN_HEIGHT_CHARS)
-        sta $fd
-        lda #>(SCREEN_WIDTH_CHARS * SCREEN_HEIGHT_CHARS)
-        sta $fe
-clear_attr:
-        ldy #$00
-        lda #$0f                ; White on black (same as default)
-        ldx #REG_DR
-        stx VDC_REG
-        sta VDC_DATA
+        bne .cf0
+        ldy #0
+.cf1:   lda font+256,y
+        jsr putbyte
         iny
-        inc $fb
-        bne no_inc3_fc
-        inc $fc
-no_inc3_fc:
-        dec $fd
-        bne clear_attr
-        dec $fe
-        bne clear_attr
-
-        ; ===== Draw test pattern: 16 shapes repeated across first row =====
-        ; We'll fill the first 16 columns of the first row with shapes 0-15, each with a unique color.
-        ldy #$00                ; Row index (0-15 for full screen, but we only do first row)
-draw_row:
-        ldx #$00                ; Column index (0-15)
-draw_col:
-        ; ----- Calculate screen memory offset: (row*SCREEN_WIDTH_CHARS + col) -----
-        tya
-        asl a                   ; *2
-        asl a                   ; *4
-        asl a                   ; *8
-        asl a                   ; *16
-        asl a                   ; *32
-        tay                     ; Y = row*32
-        txa
-        clc
-        adc #$00                ; Add column offset (0-15)
-        tax                     ; X = offset in screen memory
-
-        ; ----- Write character code (shape index) to screen memory -----
-        ; Character set: 0-63 = text, 64-79 = shapes 0-15
-        tya                     ; Reuse Y for column (0-15)
-        and #$0f                ; Ensure 0-15
-        clc
-        adc #$64                ; Base code for shapes = $64
-        tay                     ; Y = character code to write
-
-        ldx #<SCREEN_BASE
-        stx $fb
-        lda #>SCREEN_BASE
-        stx $fc
-        txa
-        clc
-        adc #<SCREEN_BASE
-        sta $fb
-        lda #>SCREEN_BASE
-        sta $fc
-        ldx #REG_UAH
-        stx VDC_REG
-        lda #$00
-        sta VDC_DATA            ; High byte of address (0 for <$0100)
-        ldx #REG_UAL
-        stx VDC_REG
-        txa
-        sta VDC_DATA            ; Low byte of address
-        ldx #REG_DR
-        stx VDC_REG
-        tya
-        sta VDC_DATA            ; Write character code
-
-        ; ----- Write attribute byte (foreground color = column, background = green) -----
-        ; Attribute memory base = ATTRIBUTE_BASE, same offset as screen memory
-        ldx #<ATTRIBUTE_BASE
-        stx $fb
-        lda #>ATTRIBUTE_BASE
-        stx $fc
-        txa
-        clc
-        adc #<ATTRIBUTE_BASE
-        sta $fb
-        lda #>ATTRIBUTE_BASE
-        sta $fc
-        ldx #REG_UAH
-        stx VDC_REG
-        lda #$08
-        sta VDC_DATA            ; High byte = $08
-        ldx #REG_UAL
-        stx VDC_REG
-        txa
-        sta VDC_DATA            ; Low byte = column offset
-        ldx #REG_DR
-        stx VDC_REG
-        tya                     ; Foreground color = column (0-15)
-        ora #$00                ; Background = 0 (green) -> attribute = FG<<4 | BG
-        sta VDC_DATA
-
-        inx
-        cpx #SCREEN_WIDTH_CHARS ; 32 columns (but we only do first 16 for shapes)
-        bne draw_col
-
+        bne .cf1
+        ldy #0
+.cf2:   lda font+512,y
+        jsr putbyte
         iny
-        cpy #SCREEN_HEIGHT_CHARS ; 16 rows
-        bne draw_row
+        bne .cf2
+        ldy #0
+.cf3:   lda font+768,y
+        jsr putbyte
+        iny
+        bne .cf3
 
-        rts                     ; Return from subroutine
+;--- build the 32 x 16 screen matrix (512 bytes) --------------------
+        lda #<SCREEN
+        sta $fb
+        lda #>SCREEN
+        sta $fc
+        jsr set_uaddr
 
-        ; ===== Character set data ==========
-        ; Reserve 1280 bytes for the character set (64*16 + 16*16)
-        ; This will be filled with zeros; replace with actual bitmap data as needed.
+        ldy #0
+.sc0:   lda screen+0,y
+        jsr putbyte
+        iny
+        bne .sc0
+        ldy #0
+.sc1:   lda screen+256,y
+        jsr putbyte
+        iny
+        bne .sc1
 
-CHARSET:
-        DS 1280
-        end
+.hang:  jmp .hang
+
+;---------------------------------------------------------------------
+; wreg -- write A into VDC register X, waiting for the VDC to be ready
+;---------------------------------------------------------------------
+wreg:   stx VDC_A
+.wr1:   bit VDC_A
+        bpl .wr1
+        sta VDC_D
+        rts
+
+;---------------------------------------------------------------------
+; set_uaddr -- set the VDC update address from $fc (high) / $fb (low)
+;---------------------------------------------------------------------
+set_uaddr:
+        lda $fc
+        ldx #R_UAHI
+        jsr wreg
+        lda $fb
+        ldx #R_UALO
+        jsr wreg
+        rts
+
+;---------------------------------------------------------------------
+; putbyte -- store A at the VDC update address (address auto increments)
+;---------------------------------------------------------------------
+putbyte:
+        ldx #R_DATA
+        jmp wreg
+
+;---------------------------------------------------------------------
+; Character set: 64 MC6847 glyphs, 16 bytes each.  The internal character
+; ROM stores 5x7 glyphs in an 8x12 cell; rows 3..9 are used here.
+;---------------------------------------------------------------------
+font:
+        db $38,$44,$04,$34,$54,$54,$38,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$10,$28,$44,$44,$7C,$44,$44,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$78,$24,$24,$38
+        db $24,$24,$78,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $38,$44,$40,$40,$40,$44,$38,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$78,$24,$24,$24,$24,$24,$78,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$7C,$40,$40,$70
+        db $40,$40,$7C,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $7C,$40,$40,$70,$40,$40,$40,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$3C,$40,$40,$4C,$44,$44,$3C,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$44,$44,$44,$7C
+        db $44,$44,$44,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $38,$10,$10,$10,$10,$10,$38,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$04,$04,$04,$04,$44,$44,$38,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$44,$48,$50,$60
+        db $50,$48,$44,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $40,$40,$40,$40,$40,$40,$7C,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$44,$6C,$54,$54,$44,$44,$44,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$44,$64,$54,$4C
+        db $44,$44,$44,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $7C,$44,$44,$44,$44,$44,$7C,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$78,$44,$44,$78,$40,$40,$40,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$38,$44,$44,$44
+        db $54,$48,$34,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $78,$44,$44,$78,$50,$48,$44,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$38,$44,$20,$10,$08,$44,$38,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$7C,$10,$10,$10
+        db $10,$10,$10,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $44,$44,$44,$44,$44,$44,$38,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$44,$44,$44,$28,$28,$10,$10,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$44,$44,$44,$54
+        db $54,$6C,$44,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $44,$44,$28,$10,$28,$44,$44,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$44,$44,$28,$10,$10,$10,$10,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$7C,$04,$08,$10
+        db $20,$40,$7C,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $70,$40,$40,$40,$40,$40,$70,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$40,$40,$20,$10,$08,$04,$04,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$1C,$04,$04,$04
+        db $04,$04,$1C,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $10,$38,$54,$10,$10,$10,$10,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$00,$10,$20,$7C,$20,$10,$00,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $10,$10,$10,$10,$10,$00,$10,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$28,$28,$28,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$28,$28,$6C,$00
+        db $6C,$28,$28,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $10,$3C,$40,$38,$04,$78,$10,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$64,$64,$08,$10,$20,$4C,$4C,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$20,$50,$50,$20
+        db $54,$48,$34,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $30,$30,$30,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$10,$20,$40,$40,$40,$20,$10,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$10,$08,$04,$04
+        db $04,$08,$10,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $00,$10,$38,$7C,$38,$10,$00,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$00,$10,$10,$7C,$10,$10,$00,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$60
+        db $60,$20,$40,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $00,$00,$00,$7C,$00,$00,$00,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$00,$60,$60,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$04,$04,$08,$10
+        db $20,$40,$40,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $30,$48,$48,$48,$48,$48,$30,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$10,$30,$10,$10,$10,$10,$38,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$38,$44,$04,$38
+        db $40,$40,$7C,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $38,$44,$04,$08,$04,$44,$38,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$08,$18,$28,$7C,$08,$08,$08,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$7C,$40,$78,$04
+        db $04,$44,$38,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $38,$40,$40,$78,$44,$44,$38,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$7C,$04,$08,$10,$20,$40,$40,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$38,$44,$44,$38
+        db $44,$44,$38,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $38,$44,$44,$3C,$04,$04,$38,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$00,$30,$30,$00,$30,$30,$00,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$30,$30,$00,$30
+        db $30,$10,$20,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $08,$10,$20,$40,$20,$10,$08,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00,$00,$00,$7C,$00,$7C,$00,$00,$00
+        db $00,$00,$00,$00,$00,$00,$00,$00,$20,$10,$08,$04
+        db $08,$10,$20,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        db $30,$48,$08,$10,$10,$00,$10,$00,$00,$00,$00,$00
+        db $00,$00,$00,$00
+
+;---------------------------------------------------------------------
+; Screen matrix: 32 x 16 bytes (one byte per character cell).
+;---------------------------------------------------------------------
+screen:
+        db $0D,$03,$36,$38,$34,$37,$20,$16,$04,$07,$20,$0D
+        db $0F,$04,$05,$20,$0F,$0E,$20,$03,$31,$32,$38,$20
+        db $16,$04,$03,$20,$20,$20,$20,$20,$32,$35,$36,$18
+        db $31,$32,$38,$20,$33,$32,$18,$31,$36,$20,$03,$05
+        db $0C,$0C,$13,$20,$38,$18,$38,$20,$20,$20,$20,$20
+        db $20,$20,$20,$20,$00,$01,$02,$03,$04,$05,$06,$07
+        db $08,$09,$0A,$0B,$0C,$0D,$0E,$0F,$10,$11,$12,$13
+        db $14,$15,$16,$17,$18,$19,$1A,$1B,$1C,$1D,$1E,$1F
+        db $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$2A,$2B
+        db $2C,$2D,$2E,$2F,$30,$31,$32,$33,$34,$35,$36,$37
+        db $38,$39,$3A,$3B,$3C,$3D,$3E,$3F,$00,$01,$02,$03
+        db $04,$05,$06,$07,$08,$09,$0A,$0B,$0C,$0D,$0E,$0F
+        db $10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$1A,$1B
+        db $1C,$1D,$1E,$1F,$20,$21,$22,$23,$24,$25,$26,$27
+        db $28,$29,$2A,$2B,$2C,$2D,$2E,$2F,$30,$31,$32,$33
+        db $34,$35,$36,$37,$38,$39,$3A,$3B,$3C,$3D,$3E,$3F
+        db $00,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0A,$0B
+        db $0C,$0D,$0E,$0F,$10,$11,$12,$13,$14,$15,$16,$17
+        db $18,$19,$1A,$1B,$1C,$1D,$1E,$1F,$20,$21,$22,$23
+        db $24,$25,$26,$27,$28,$29,$2A,$2B,$2C,$2D,$2E,$2F
+        db $30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$3A,$3B
+        db $3C,$3D,$3E,$3F,$00,$01,$02,$03,$04,$05,$06,$07
+        db $08,$09,$0A,$0B,$0C,$0D,$0E,$0F,$10,$11,$12,$13
+        db $14,$15,$16,$17,$18,$19,$1A,$1B,$1C,$1D,$1E,$1F
+        db $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$2A,$2B
+        db $2C,$2D,$2E,$2F,$30,$31,$32,$33,$34,$35,$36,$37
+        db $38,$39,$3A,$3B,$3C,$3D,$3E,$3F,$00,$01,$02,$03
+        db $04,$05,$06,$07,$08,$09,$0A,$0B,$0C,$0D,$0E,$0F
+        db $10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$1A,$1B
+        db $1C,$1D,$1E,$1F,$20,$21,$22,$23,$24,$25,$26,$27
+        db $28,$29,$2A,$2B,$2C,$2D,$2E,$2F,$30,$31,$32,$33
+        db $34,$35,$36,$37,$38,$39,$3A,$3B,$3C,$3D,$3E,$3F
+        db $00,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0A,$0B
+        db $0C,$0D,$0E,$0F,$10,$11,$12,$13,$14,$15,$16,$17
+        db $18,$19,$1A,$1B,$1C,$1D,$1E,$1F,$20,$21,$22,$23
+        db $24,$25,$26,$27,$28,$29,$2A,$2B,$2C,$2D,$2E,$2F
+        db $30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$3A,$3B
+        db $3C,$3D,$3E,$3F,$00,$01,$02,$03,$04,$05,$06,$07
+        db $08,$09,$0A,$0B,$0C,$0D,$0E,$0F,$10,$11,$12,$13
+        db $14,$15,$16,$17,$18,$19,$1A,$1B,$1C,$1D,$1E,$1F
+        db $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$2A,$2B
+        db $2C,$2D,$2E,$2F,$30,$31,$32,$33,$34,$35,$36,$37
+        db $38,$39,$3A,$3B,$3C,$3D,$3E,$3F
