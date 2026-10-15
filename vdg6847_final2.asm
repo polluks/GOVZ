@@ -18,6 +18,10 @@
 ; R27 (extra address increment per row) after every character row, so
 ; R27 must stay 0 here; the C128 KERNAL also uses R1=80, R27=0.
 ;
+; Every subroutine call in tail position is a JMP instead of JSR/RTS
+; (tail call optimisation), e.g. putbyte -> wreg; wreg's RTS then
+; returns straight to putbyte's caller.
+;
 ; Assemble:
 ;   vasm6502_oldstyle -Fbin -o vdg6847.bin vdg6847_final2.asm
 ; Make a runnable program:
@@ -161,15 +165,14 @@ set_uaddr:
         jsr wreg
         lda $fb
         ldx #R_UALO
-        jsr wreg
-        rts
+        jmp wreg            ; tail call: wreg's RTS returns to our caller
 
 ;---------------------------------------------------------------------
 ; putbyte -- store A at the VDC update address (address auto increments)
 ;---------------------------------------------------------------------
 putbyte:
         ldx #R_DATA
-        jmp wreg
+        jmp wreg            ; tail call
 
 ;---------------------------------------------------------------------
 ; Character set: 64 MC6847 glyphs, 16 bytes each.  The internal character
